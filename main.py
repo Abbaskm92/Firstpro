@@ -2,13 +2,14 @@ import argparse
 import re
 import os
 import time
+import math
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.utils.cell import column_index_from_string
 from openpyxl.cell.cell import MergedCell
-from openpyxl.styles import Font
+from openpyxl.styles import Font, Alignment, PatternFill
 
 # ================= Helpers =================
 def safe_sheet_name(name: str) -> str:
@@ -71,9 +72,7 @@ def unmerge_covering(ws, row, col_idx):
             pass
 
 def clone_style(dst, src, fallback_num_fmt=None):
-    """
-    Copy core style attributes from src to dst. Skip on merged non-anchors.
-    """
+    """Copy core style attributes from src to dst. Skip on merged non-anchors."""
     if isinstance(dst, MergedCell):
         return
     try:
@@ -90,14 +89,11 @@ def get_cell(ws, row, letter):
     return ws[f"{letter}{row}"]
 
 def style_prototypes(ws, item_row, name_col="B", price_col="E", comm_col="F", final_col="G"):
-    """
-    Capture style prototypes from the template's first item row.
-    We’ll apply these to every new item row for uniformity.
-    """
+    """Capture style prototypes from the template's first item row."""
     proto = {}
     proto["name"] = get_cell(ws, item_row, name_col)           # B (name anchor)
     proto["price"] = get_cell(ws, item_row, price_col)         # E
-    proto["comm"] = get_cell(ws, item_row, comm_col)           # F
+    proto["comm"]  = get_cell(ws, item_row, comm_col)          # F
     proto["final"] = get_cell(ws, item_row, final_col)         # G
     proto["num_fmt"] = proto["price"].number_format or "#,##0.00"
     return proto
@@ -145,6 +141,55 @@ def safe_save_workbook(wb, out_path: Path, mode: str = "unique") -> Path:
         except PermissionError:
             candidate = out_path.with_name(f"{out_path.stem} ({i}){suffix}")
             i += 1
+
+# ---- wrapping & row-height helpers ----
+def get_col_width(ws, col_letter, default_width=8.43):
+    """Return effective column width; if not set in sheet, return Excel default."""
+    w = ws.column_dimensions[col_letter].width
+    return float(w) if w else default_width
+
+def estimate_needed_lines(text: str, total_width_chars: float, min_chars_per_line: int = 10) -> int:
+    """
+    Roughly estimate how many wrapped lines are needed based on merged width (in 'Excel width units').
+    """
+    if not text:
+        return 1
+    parts = str(text).splitlines() or [str(text)]
+    lines = 0
+    chars_per_line = max(min_chars_per_line, int(total_width_chars * 1.1))
+    for seg in parts:
+        seg = seg.strip()
+        if not seg:
+            lines += 1
+            continue
+        lines += max(1, math.ceil(len(seg) / chars_per_line))
+    return lines
+
+def apply_wrap_and_autoheight(ws, row, merged_cols=("B","C","D"), base_height=15, min_height=15, max_height=180):
+    """
+    Enable wrapping in B{row} (anchor of merged B:D) and increase row height to fit.
+    """
+    total_width = sum(get_col_width(ws, c) for c in merged_cols)
+    cell = ws[f"{merged_cols[0]}{row}"]
+    text = "" if cell.value is None else str(cell.value)
+    needed_lines = estimate_needed_lines(text, total_width)
+    new_height = max(min_height, min(max_height, base_height * needed_lines))
+    cell.alignment = Alignment(wrap_text=True, vertical="top")
+    for c in merged_cols[1:]:
+        mc = ws[f"{c}{row}"]
+        if not isinstance(mc, MergedCell):
+            mc.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[row].height = new_height
+
+# ---- white background helper ----
+def apply_white_background(ws, start_row, end_row, cols=("B","C","D","E","F","G")):
+    """Fill the specified range with white background."""
+    white_fill = PatternFill(fill_type="solid", fgColor="FFFFFF")
+    for row in range(start_row, end_row + 1):
+        for col in cols:
+            cell = ws[f"{col}{row}"]
+            if not isinstance(cell, MergedCell):
+                cell.fill = white_fill
 
 # ================= Main work =================
 def fill_invoice_per_vendor(
@@ -244,12 +289,13 @@ def fill_invoice_per_vendor(
         ws = wb.copy_worksheet(template_ws)
         ws.title = safe_sheet_name(vendor)
 
+        # HIDE GRIDLINES for this vendor sheet (view + print)
+        ws.sheet_view.showGridLines = False
+        ws.print_options.gridLines = False
+
         # Header fields
         ws[vendor_cell] = vendor
-
-        # Sequential invoice code: YYYYMMDD-<n>
-        ws[invoice_code_cell] = f"{today_str}-{idx}"
-
+        ws[invoice_code_cell] = f"{today_str}-{idx}"  # Sequential invoice code: YYYYMMDD-<n>
         ws[invoice_date_cell] = today_date
         ws[header_date_cell] = today_date
 
@@ -299,7 +345,12 @@ def fill_invoice_per_vendor(
             unmerge_covering(ws, r, f_idx)
             unmerge_covering(ws, r, g_idx)
 
-            ws[f"{name_merge_cols[0]}{r}"] = row[item_col]  # B{r}
+            # Write item text into B (anchor of the merged B:D), enable wrap+autoheight
+            item_text = row[item_col]
+            ws[f"B{r}"] = item_text
+            apply_wrap_and_autoheight(ws, r, merged_cols=("B", "C", "D"))
+
+            # Numeric values
             price_val = to_number(row[price_col])
             comm_val = to_number(row[commission_col])
             ws[f"{price_col_letter}{r}"] = price_val
@@ -341,8 +392,7 @@ def fill_invoice_per_vendor(
         ws[f"{commission_col_letter}{total_row}"] = None
 
         # Make G{total_row} bold and size 16 (visual emphasis)
-        cell_total = ws[f"{final_col_letter}{total_row}"]
-        cell_total.font = Font(bold=True, size=16)
+        ws[f"{final_col_letter}{total_row}"].font = Font(bold=True, size=16)
 
         # Ensure summary rows visible & styled uniformly
         ws.row_dimensions[sum_row].hidden = False
@@ -350,6 +400,9 @@ def fill_invoice_per_vendor(
         for col_letter in (price_col_letter, commission_col_letter, final_col_letter):
             clone_style(get_cell(ws, sum_row, col_letter), proto["final"], fallback_num_fmt=num_fmt)
             clone_style(get_cell(ws, total_row, col_letter), proto["final"], fallback_num_fmt=num_fmt)
+
+        # Force white background from first item row through total row (B..G)
+        apply_white_background(ws, first_item_row, total_row, cols=("B", "C", "D", "E", "F", "G"))
 
         made_any += 1
 
@@ -360,6 +413,12 @@ def fill_invoice_per_vendor(
         except Exception:
             pass
 
+    # Final sweep: hide gridlines on ALL sheets (view + print)
+    for sname in wb.sheetnames:
+        ws2 = wb[sname]
+        ws2.sheet_view.showGridLines = False
+        ws2.print_options.gridLines = False
+
     # --- Save safely ---
     actual_path = safe_save_workbook(wb, Path(out_file), mode=out_mode)
     print(f"Invoice sheets created: {made_any}")
@@ -369,7 +428,7 @@ def fill_invoice_per_vendor(
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--file", required=True, help="Path to Test Sample.xlsx")
-    p.add_argument("--template", required=True, help="Path to Invoice template.xlsx")
+    p.add_argument("--template", required=True, help="Path to Invoice test.xlsx")
     p.add_argument("--out", default="Invoice_Output.xlsx", help="Output file name")
     p.add_argument(
         "--out-mode",
