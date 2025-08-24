@@ -181,7 +181,7 @@ def apply_wrap_and_autoheight(ws, row, merged_cols=("B","C","D"), base_height=15
             mc.alignment = Alignment(wrap_text=True, vertical="top")
     ws.row_dimensions[row].height = new_height
 
-# ---- white background helper ----
+# ---- fills: background & zebra ----
 def apply_white_background(ws, start_row, end_row, cols=("B","C","D","E","F","G")):
     """Fill the specified range with white background."""
     white_fill = PatternFill(fill_type="solid", fgColor="FFFFFF")
@@ -190,6 +190,24 @@ def apply_white_background(ws, start_row, end_row, cols=("B","C","D","E","F","G"
             cell = ws[f"{col}{row}"]
             if not isinstance(cell, MergedCell):
                 cell.fill = white_fill
+
+def apply_zebra_fill(ws, start_row, end_row, cols=("B","C","D","E","F","G"),
+                     odd_color="FFFFFF", even_color="D9D9D9"):
+    """
+    Alternate row fills from start_row..end_row across given columns.
+    Row parity is based on 0-index from start_row:
+      - row index 0 -> odd_color (white by default)
+      - row index 1 -> even_color (#D9D9D9)
+      - etc.
+    """
+    fill_odd  = PatternFill(fill_type="solid", fgColor=odd_color)
+    fill_even = PatternFill(fill_type="solid", fgColor=even_color)
+    for i, r in enumerate(range(start_row, end_row + 1)):
+        fill = fill_odd if (i % 2 == 0) else fill_even
+        for col in cols:
+            cell = ws[f"{col}{r}"]
+            if not isinstance(cell, MergedCell):
+                cell.fill = fill
 
 # ================= Main work =================
 def fill_invoice_per_vendor(
@@ -246,8 +264,11 @@ def fill_invoice_per_vendor(
     start = pd.Timestamp(year, month, 1)
     end = start + pd.offsets.MonthBegin(1)
 
-    # Filter to desired month
-    dfm = df[(df[date_col] >= start) & (df[date_col] < end)]
+    # --- Inclusive last day of month ---
+    last_day = end - pd.Timedelta(days=1)
+
+    # Filter to desired month: from 1st to last day (inclusive)
+    dfm = df[(df[date_col] >= start) & (df[date_col] <= last_day)]
 
     # Load template
     wb = load_workbook(template_file)
@@ -346,8 +367,7 @@ def fill_invoice_per_vendor(
             unmerge_covering(ws, r, g_idx)
 
             # Write item text into B (anchor of the merged B:D), enable wrap+autoheight
-            item_text = row[item_col]
-            ws[f"B{r}"] = item_text
+            ws[f"B{r}"] = row[item_col]
             apply_wrap_and_autoheight(ws, r, merged_cols=("B", "C", "D"))
 
             # Numeric values
@@ -364,6 +384,12 @@ def fill_invoice_per_vendor(
             ws[f"{price_col_letter}{r}"].number_format = num_fmt
             ws[f"{commission_col_letter}{r}"].number_format = num_fmt
             ws[f"{final_col_letter}{r}"].number_format = num_fmt
+
+        # >>> Zebra-striping for item rows (B..G) <<<
+        first_row = first_item_row
+        last_row = first_item_row + n_items - 1
+        apply_zebra_fill(ws, first_row, last_row, cols=("B","C","D","E","F","G"),
+                         odd_color="FFFFFF", even_color="D9D9D9")
 
         # Clear the immediate spacer row after the last item (fix stray PRODUCT formula)
         spacer_row = first_item_row + n_items
@@ -401,8 +427,8 @@ def fill_invoice_per_vendor(
             clone_style(get_cell(ws, sum_row, col_letter), proto["final"], fallback_num_fmt=num_fmt)
             clone_style(get_cell(ws, total_row, col_letter), proto["final"], fallback_num_fmt=num_fmt)
 
-        # Force white background from first item row through total row (B..G)
-        apply_white_background(ws, first_item_row, total_row, cols=("B", "C", "D", "E", "F", "G"))
+        # Keep summary rows WHITE (don’t overwrite zebra)
+        apply_white_background(ws, sum_row, total_row, cols=("B","C","D","E","F","G"))
 
         made_any += 1
 
