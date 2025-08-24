@@ -91,10 +91,10 @@ def get_cell(ws, row, letter):
 def style_prototypes(ws, item_row, name_col="B", price_col="E", comm_col="F", final_col="G"):
     """Capture style prototypes from the template's first item row."""
     proto = {}
-    proto["name"] = get_cell(ws, item_row, name_col)           # B (name anchor)
-    proto["price"] = get_cell(ws, item_row, price_col)         # E
-    proto["comm"]  = get_cell(ws, item_row, comm_col)          # F
-    proto["final"] = get_cell(ws, item_row, final_col)         # G
+    proto["name"]  = get_cell(ws, item_row, name_col)     # B (name anchor)
+    proto["price"] = get_cell(ws, item_row, price_col)    # E
+    proto["comm"]  = get_cell(ws, item_row, comm_col)     # F
+    proto["final"] = get_cell(ws, item_row, final_col)    # G
     proto["num_fmt"] = proto["price"].number_format or "#,##0.00"
     return proto
 
@@ -391,14 +391,18 @@ def fill_invoice_per_vendor(
         apply_zebra_fill(ws, first_row, last_row, cols=("B","C","D","E","F","G"),
                          odd_color="FFFFFF", even_color="D9D9D9")
 
-        # Clear the immediate spacer row after the last item (fix stray PRODUCT formula)
-        spacer_row = first_item_row + n_items
-        for col in ("E", "F", "G"):
-            ws[f"{col}{spacer_row}"] = None
+        # Remove the extra spacer row AFTER the last item (only if more than one item)
+        if n_items > 1:
+            spacer_row = first_item_row + n_items
+            ws.delete_rows(spacer_row, 1)
+            # Since we deleted one row above the summaries, shift summary rows up by 1
+            sum_row_shift = -1
+        else:
+            sum_row_shift = 0
 
-        # Sum row and total row, adjusted by item count
-        sum_row = (base_sum_row - 1) + n_items      # 1 item -> 21, 2 items -> 22, etc.
-        total_row = (base_total_row - 1) + n_items  # 1 item -> 23, 2 items -> 24, etc.
+        # Sum row and total row, adjusted by item count (+ possible shift)
+        sum_row = (base_sum_row - 1) + n_items + sum_row_shift      # e.g., 1 item -> 21, 2 items -> 22-1 = 21, etc.
+        total_row = (base_total_row - 1) + n_items + sum_row_shift  # e.g., 1 item -> 23, 2 items -> 24-1 = 23
         start_sum_row = first_item_row
         end_sum_row = first_item_row + n_items - 1
 
